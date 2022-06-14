@@ -1,4 +1,5 @@
 use core::marker::PhantomData;
+use critical_section::{CriticalSection, Mutex};
 use embedded_hal::blocking::delay::DelayMs;
 use usb_device::{Result, UsbDirection, UsbError};
 use usb_device::bus::{UsbBusAllocator, PollResult};
@@ -7,7 +8,6 @@ use crate::transition::{EndpointConfig, EndpointDescriptor};
 use crate::ral::{read_reg, write_reg, modify_reg, otg_global, otg_device, otg_pwrclk, otg_global_dieptxfx};
 
 use crate::target::UsbRegisters;
-use crate::target::interrupt::{self, Mutex, CriticalSection};
 use crate::endpoint::{EndpointIn, EndpointOut};
 use crate::endpoint_memory::{EndpointMemoryAllocator, EndpointBufferState};
 use crate::{UsbPeripheral, PhyType};
@@ -35,7 +35,7 @@ impl<USB: UsbPeripheral> UsbBus<USB> {
         self.peripheral
     }
 
-    fn configure_all(&self, cs: &CriticalSection) {
+    fn configure_all(&self, cs: CriticalSection<'_>) {
         let regs = self.regs.borrow(cs);
 
         // Rx FIFO
@@ -108,7 +108,7 @@ impl<USB: UsbPeripheral> UsbBus<USB> {
         }
     }
 
-    fn deconfigure_all(&self, cs: &CriticalSection) {
+    fn deconfigure_all(&self, cs: CriticalSection<'_>) {
         let regs = self.regs.borrow(cs);
 
         // disable interrupts
@@ -128,7 +128,7 @@ impl<USB: UsbPeripheral> UsbBus<USB> {
     }
 
     pub fn force_reset(&self, delay: &mut impl DelayMs<u32>) -> Result<()> {
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
             write_reg!(otg_device, regs.device(), DCTL, SDIS: 1); // Soft disconnect
             delay.delay_ms(3);
@@ -162,7 +162,7 @@ impl<USB: UsbPeripheral> UsbBus<USB> {
             panic!("ulpi_read is only supported with external ULPI PHYs");
         }
 
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
 
             // Begin ULPI register read transaction
@@ -197,7 +197,7 @@ impl<USB: UsbPeripheral> UsbBus<USB> {
             panic!("ulpi_write is only supported with external ULPI PHYs");
         }
 
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
 
             // Begin ULPI register write transaction
@@ -356,7 +356,7 @@ impl<USB: UsbPeripheral> usb_device::bus::UsbBus for UsbBus<USB> {
         // Enable USB_OTG in RCC
         USB::enable();
 
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
 
             let core_id = read_reg!(otg_global, regs.global(), CID);
@@ -506,7 +506,7 @@ impl<USB: UsbPeripheral> usb_device::bus::UsbBus for UsbBus<USB> {
     }
 
     fn reset(&self) {
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
 
             self.configure_all(cs);
@@ -516,7 +516,7 @@ impl<USB: UsbPeripheral> usb_device::bus::UsbBus for UsbBus<USB> {
     }
 
     fn set_device_address(&self, addr: u8) {
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
 
             modify_reg!(otg_device, regs.device(), DCFG, DAD: addr as u32);
@@ -573,7 +573,7 @@ impl<USB: UsbPeripheral> usb_device::bus::UsbBus for UsbBus<USB> {
     }
 
     fn poll(&self) -> PollResult {
-        interrupt::free(|cs| {
+        critical_section::with(|cs| {
             let regs = self.regs.borrow(cs);
 
             let core_id = read_reg!(otg_global, regs.global(), CID);
@@ -680,7 +680,7 @@ impl<USB: UsbPeripheral> usb_device::bus::UsbBus for UsbBus<USB> {
 
                     if status == 0x02 || status == 0x06 {
                         if let Some(ep) = &self.allocator.endpoints_out[epnum as usize] {
-                            let mut buffer = ep.buffer.borrow(cs).borrow_mut();
+                            let mut buffer = ep.buffer.borrow_ref_mut(cs);
                             if buffer.state() == EndpointBufferState::Empty {
                                 read_reg!(otg_global, regs.global(), GRXSTSP); // pop GRXSTSP
 
